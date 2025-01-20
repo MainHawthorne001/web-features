@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import webSpecs from 'web-specs' assert { type: 'json' };
 
-import features from '../index.js';
+import { features } from '../index.js';
 
 // Specs needs to be in "good standing". Nightly URLs are used if available,
 // otherwise the snapshot/versioned URL is used. See browser-specs/web-specs
@@ -26,16 +26,76 @@ const defaultAllowlist: allowlistItem[] = [
     //     "Allowed because…. Remove this exception when https://example.com/org/repo/pull/1234 merges."
     // ]
     [
-        "https://w3c.github.io/IntersectionObserver/v2/",
-        "Allowed because it's shipped in Chrome and tracked on caniuse.com. Remove this exception when https://github.com/w3c/browser-specs/pull/1210 merges."
-    ],
-    [
         "https://wicg.github.io/controls-list/",
         "Allowed because it's shipped in Chrome. Remove this exception if https://github.com/whatwg/html/pull/6715 is merged."
     ],
     [
         "https://www.w3.org/TR/webnn/",
         "Allowed because this URL actually serves the same content as the Editor Draft URL, and because the ED URL is a bit verbose. See https://github.com/mdn/browser-compat-data/pull/22569#issuecomment-1992632118."
+    ],
+    [
+        "https://github.com/WebAssembly/spec/blob/main/proposals/bulk-memory-operations/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/exception-handling/blob/main/proposals/exception-handling/Exceptions.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/extended-const/blob/main/proposals/extended-const/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/multi-memory/blob/main/proposals/multi-memory/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/spec/blob/main/proposals/multi-value/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/spec/blob/main/proposals/nontrapping-float-to-int-conversion/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/spec/blob/main/proposals/reference-types/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/spec/blob/main/proposals/sign-extension-ops/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/relaxed-simd/blob/main/proposals/relaxed-simd/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/tail-call/blob/main/proposals/tail-call/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/threads/blob/main/proposals/threads/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/function-references/blob/main/proposals/function-references/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/js-string-builtins/blob/main/proposals/js-string-builtins/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/memory64/blob/main/proposals/memory64/Overview.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://github.com/WebAssembly/exception-handling/blob/main/proposals/exception-handling/legacy/Exceptions.md",
+        "Allowed because there is no other specification to link to."
+    ],
+    [
+        "https://immersive-web.github.io/webvr/spec/1.1/",
+        "Allowed because this is the legacy spec that defines WebVR."
     ]
 ];
 
@@ -81,7 +141,8 @@ function suggestSpecs(bad: URL): void {
     }
 }
 
-let checked = 0;
+let checkedFeatures = 0;
+let checkedSpecs = 0;
 let errors = 0;
 
 // Ensure every exception in defaultAllowlist is needed
@@ -96,19 +157,26 @@ for (const [allowedUrl, message] of defaultAllowlist) {
 for (const [id, data] of Object.entries(features)) {
     const specs = Array.isArray(data.spec) ? data.spec : [data.spec];
     for (const spec of specs) {
-        const url = new URL(spec);
-        if (!isOK(url)) {
+        let url: URL;
+        try {
+            url = new URL(spec);
+        } catch (error) {
+            console.error(`Invalid URL "${spec}" found in spec for "${data.name}"`);
+            errors++;
+        }
+        if (url && !isOK(url)) {
             console.error(`URL for ${id} not in web-specs: ${url.toString()}`);
             suggestSpecs(url);
             errors++;
         }
-        checked++;
+        checkedSpecs++;
     }
+    checkedFeatures++;
 }
 
 if (errors) {
-    console.log(`\n${checked} features checked, found ${errors} error(s)`);
+    console.log(`\nChecked ${checkedSpecs} specs in ${checkedFeatures} features, found ${errors} error(s)`);
     process.exit(1);
 } else {
-    console.log(`${checked} features checked, no errors`);
+    console.log(`\nChecked ${checkedSpecs} specs in ${checkedFeatures} features, no errors`);
 }

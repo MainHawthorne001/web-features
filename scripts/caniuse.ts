@@ -1,7 +1,7 @@
 import lite from 'caniuse-lite';
 import winston from "winston";
 
-import features from '../index.js';
+import { features } from '../index.js';
 
 const logger = winston.createLogger({
     level: 'info',
@@ -35,6 +35,9 @@ for (const [id, data] of Object.entries(features)) {
     for (const caniuseId of caniuseIds) {
         if (!mapping.has(caniuseId)) {
             throw new Error(`Invalid caniuse ID used for ${id}: ${caniuseId}`);
+        }
+        if(mapping.get(caniuseId)){
+            throw new Error(`Duplicate caniuse ID "${caniuseId}" used for "${id}" and "${mapping.get(caniuseId)}"`);
         }
         if (hiddenCaniuseItems.has(caniuseId)) {
             throw new Error(`A caniuse ID used for "${id}" ("${caniuseId}") is hidden on caniuse.com`);

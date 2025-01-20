@@ -1,8 +1,7 @@
 name: WebP
 description: The WebP image format is a raster graphics file format that supports animation, alpha transparency, and lossy as well as lossless compression.
-spec: https://www.ietf.org/archive/id/draft-zern-webp-15.html
+spec: https://www.rfc-editor.org/rfc/rfc9649
 caniuse: webp
-usage_stats: https://chromestatus.com/metrics/feature/timeline/popularity/3797
 # TODO: Add notes about animated WebP coming later in Chrome (but don't mark this as partially supported)
 status:
   baseline: high

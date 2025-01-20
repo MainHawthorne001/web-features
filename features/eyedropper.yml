@@ -5,3 +5,4 @@ compat_features:
   - api.EyeDropper
   - api.EyeDropper.EyeDropper
   - api.EyeDropper.open
+  - api.EyeDropper.secure_context_required

@@ -12,7 +12,13 @@ updates:
     directory: packages/web-features
     schedule:
       interval: daily
+    versioning-strategy: increase
   - package-ecosystem: npm
     directory: packages/compute-baseline
+    schedule:
+      interval: daily
+
+  - package-ecosystem: github-actions
+    directory: "/"
     schedule:
       interval: daily

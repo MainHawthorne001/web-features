@@ -1,14 +1,21 @@
-import { computeBaseline, setLogger } from "compute-baseline";
-import { Compat, Feature } from "compute-baseline/browser-compat-data";
-import assert from "node:assert/strict";
+import { Temporal } from "@js-temporal/polyfill";
+import {
+  computeBaseline,
+  getStatus,
+  parseRangedDateString,
+  setLogger,
+} from "compute-baseline";
+import { Compat, feature, Feature } from "compute-baseline/browser-compat-data";
+import { fdir } from "fdir";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import winston from "winston";
-import YAML, { Document } from "yaml";
+import YAML, { Document, Scalar, YAMLSeq } from "yaml";
 import yargs from "yargs";
-import { fdir } from "fdir";
+
+const compat = new Compat();
 
 const argv = yargs(process.argv.slice(2))
   .scriptName("dist")
@@ -40,7 +47,42 @@ const logger = winston.createLogger({
   transports: new winston.transports.Console(),
 });
 
+let exitStatus = 0;
+
 setLogger(logger);
+
+/**
+ * Check that the installed @mdn/browser-compat-data (BCD) package matches the
+ * one pinned in `package.json`. BCD updates frequently, leading to surprising
+ * error messages if you haven't run `npm install` recently.
+ */
+function checkForStaleCompat(): void {
+  const packageBCDVersionSpecifier: string = (() => {
+    const packageJSON: unknown = JSON.parse(
+      fs.readFileSync(process.env.npm_package_json, {
+        encoding: "utf-8",
+      }),
+    );
+    if (typeof packageJSON === "object" && "devDependencies" in packageJSON) {
+      const bcd = packageJSON.devDependencies["@mdn/browser-compat-data"];
+      if (typeof bcd === "string") {
+        return bcd;
+      }
+      throw new Error(
+        "@mdn/browser-compat-data version not found in package.json",
+      );
+    }
+  })();
+  const installedBCDVersion = compat.version;
+
+  if (!packageBCDVersionSpecifier.includes(installedBCDVersion)) {
+    logger.error(
+      `Installed @mdn/browser-compat-data (${installedBCDVersion}) does not match package.json version (${packageBCDVersionSpecifier})`,
+    );
+    logger.error("Run `npm install` and try again.");
+    process.exit(1);
+  }
+}
 
 /**
  * Update (or create) a dist YAML file from a feature definition YAML file.
@@ -62,8 +104,81 @@ function updateDistFile(sourcePath: string, distPath: string): void {
  */
 function checkDistFile(sourcePath: string, distPath: string): boolean {
   const expected = toDist(sourcePath).toString({ lineWidth: 0 });
-  const actual = fs.readFileSync(distPath, { encoding: "utf-8" });
-  return actual === expected;
+  try {
+    const actual = fs.readFileSync(distPath, { encoding: "utf-8" });
+    return actual === expected;
+  } catch {
+    return false;
+  }
+}
+
+type SupportStatus = ReturnType<typeof getStatus>;
+
+/**
+ * Compare two status objects for sorting.
+ *
+ * @returns -1, 0 or 1.
+ */
+function compareStatus(a: SupportStatus, b: SupportStatus) {
+  // First sort by Baseline status/date, oldest Base features first, and
+  // non-Baseline features last.
+
+  if (a.baseline_low_date !== b.baseline_low_date) {
+    if (!a.baseline_low_date) {
+      return 1;
+    }
+    if (!b.baseline_low_date) {
+      return -1;
+    }
+
+    const [aLowDate, aLowRanged] = parseRangedDateString(a.baseline_low_date);
+    const [bLowDate, bLowRanged] = parseRangedDateString(b.baseline_low_date);
+
+    // Older dates first
+    if (Temporal.PlainDate.compare(aLowDate, bLowDate) !== 0) {
+      return Temporal.PlainDate.compare(aLowDate, bLowDate);
+    }
+
+    // If dates are equal, then unranged values go first
+    if (!aLowRanged && bLowRanged) {
+      return -1;
+    }
+    if (!bLowRanged && aLowRanged) {
+      return 1;
+    }
+  }
+
+  // Next sort by number of supporting browsers.
+  const aBrowsers = Object.keys(a.support).length;
+  const bBrowsers = Object.keys(b.support).length;
+  if (aBrowsers !== bBrowsers) {
+    return bBrowsers - aBrowsers;
+  }
+  // Finally sort by the version numbers.
+  const aVersions = Object.values(a.support);
+  const bVersions = Object.values(b.support);
+  for (let i = 0; i < aVersions.length; i++) {
+    if (aVersions[i] !== bVersions[i]) {
+      const [aRanged, aVersion] = aVersions[i].startsWith("≤")
+        ? [true, aVersions[i].slice(1)]
+        : [false, aVersions[i]];
+      const [bRanged, bVersion] = bVersions[i].startsWith("≤")
+        ? [true, bVersions[i].slice(1)]
+        : [false, bVersions[i]];
+
+      if (aVersion !== bVersion) {
+        if (!aRanged && bRanged) {
+          return -1;
+        }
+        if (!bRanged && aRanged) {
+          return 1;
+        }
+      }
+
+      return Number(aVersion) - Number(bVersion);
+    }
+  }
+  return 0;
 }
 
 /**
@@ -86,23 +201,49 @@ function toDist(sourcePath: string): YAML.Document {
   if (source.compat_features) {
     source.compat_features.sort();
     if (isDeepStrictEqual(source.compat_features, taggedCompatFeatures)) {
-      logger.warn(
-        `${id}: compat_features override matches tags in @mdn/browser-compat-data. Consider deleting this override.`,
+      logger.silly(
+        `${id}: compat_features override matches tags in @mdn/browser-compat-data. Consider deleting the compat_features override.`,
       );
     }
+  }
+
+  const compatFeatures = source.compat_features ?? taggedCompatFeatures;
+  let computeFrom = compatFeatures;
+
+  const computeFromWasExplicitlySet = source.status?.compute_from !== undefined;
+  if (computeFromWasExplicitlySet) {
+    const compute_from = source.status.compute_from;
+    const keys = Array.isArray(compute_from) ? compute_from : [compute_from];
+    for (const key of keys) {
+      if (!compatFeatures.includes(key)) {
+        throw new Error(
+          `${id}: compute_from key ${key} is not among the feature's compat keys`,
+        );
+      }
+    }
+
+    computeFrom = keys;
+    delete source.status;
   }
 
   // Compute the status. A `status` block in the source takes precedence, but
   // can be removed if it matches the computed status.
   let computedStatus = computeBaseline({
-    compatKeys: source.compat_features ?? taggedCompatFeatures,
-    checkAncestors: false,
+    compatKeys: computeFrom,
+    checkAncestors: true,
   });
 
-  if (computedStatus.discouraged) {
-    logger.warn(
-      `${id}: contains at least one deprecated compat feature and can never be Baseline. Was this intentional?`,
-    );
+  if (computedStatus.discouraged && !source.discouraged) {
+    if (!source.draft_date) {
+      logger.error(
+        `${id}: contains at least one deprecated compat feature. This is forbidden for published features.`,
+      );
+      exitStatus = 1;
+    } else {
+      logger.warn(
+        `${id}: draft contains at least one deprecated compat feature. Was this intentional?`,
+      );
+    }
   }
 
   computedStatus = JSON.parse(computedStatus.toJSON());
@@ -110,9 +251,62 @@ function toDist(sourcePath: string): YAML.Document {
   if (source.status) {
     if (isDeepStrictEqual(source.status, computedStatus)) {
       logger.warn(
-        `${id}: status override matches computed status. Consider deleting this override.`,
+        `${id}: status override matches computed status. Consider deleting the status override.`,
       );
     }
+  }
+
+  // Map between status object and BCD keys with that computed status.
+  const groups = new Map<SupportStatus, string[]>();
+  for (const key of compatFeatures) {
+    const status = getStatus(id, key);
+    let added = false;
+    for (const [existingKey, list] of groups.entries()) {
+      if (isDeepStrictEqual(status, existingKey)) {
+        list.push(key);
+        added = true;
+        break;
+      }
+    }
+    if (!added) {
+      groups.set(status, [key]);
+    }
+  }
+
+  if (computeFromWasExplicitlySet) {
+    if (groups.size === 1) {
+      logger.error(
+        `${id}: uses compute_from which must not be used when the overall status does not differ from the per-key statuses. Delete the status override.`,
+      );
+      exitStatus = 1;
+    }
+
+    for (const key of compatFeatures) {
+      const f = feature(key);
+      if (f.deprecated) {
+        if (!source.draft_date) {
+          logger.error(
+            `${id}: contains contains deprecated compat feature ${f.id}. This is forbidden for published features.`,
+          );
+          exitStatus = 1;
+        } else {
+          logger.warn(
+            `${id}: draft contains deprecated compat feature ${f.id}. Was this intentional?`,
+          );
+        }
+      }
+    }
+  }
+
+  const sortedStatus = Array.from(groups.keys()).sort(compareStatus);
+
+  const sortedGroups = new Map<string, string[]>();
+  for (const status of sortedStatus) {
+    let comment = YAML.stringify(status);
+    if (isDeepStrictEqual(status, source.status ?? computedStatus)) {
+      comment = `⬇️ Same status as overall feature ⬇️\n${comment}`;
+    }
+    sortedGroups.set(comment, groups.get(status));
   }
 
   // Assemble and return the dist YAML.
@@ -129,14 +323,42 @@ function toDist(sourcePath: string): YAML.Document {
     dist.set("status", computedStatus);
   }
 
-  if (!source.compat_features) {
-    dist.set("compat_features", taggedCompatFeatures);
+  if (groups.size) {
+    insertCompatFeatures(dist, sortedGroups);
   }
 
   return dist;
 }
 
-const compat = new Compat();
+function insertCompatFeatures(yaml: Document, groups: Map<string, string[]>) {
+  if (groups.size === 1) {
+    // Add no comments when there's a single group.
+    yaml.set("compat_features", groups.values().next().value);
+    return;
+  }
+
+  const list = new YAMLSeq<Scalar<string>>();
+  for (const [comment, keys] of groups.entries()) {
+    let first = true;
+    for (const key of keys) {
+      const item = new Scalar(key);
+      if (first) {
+        item.commentBefore = comment
+          .trim()
+          .split("\n")
+          .map((line) => ` ${line}`)
+          .join("\n");
+        first = false;
+      }
+      list.add(item);
+    }
+    // Blank line between each group.
+    list.items.at(-1).comment = "\n";
+  }
+  // Avoid trailing blank line.
+  list.items.at(-1).comment = "";
+  yaml.set("compat_features", list);
+}
 
 const tagsToFeatures: Map<string, Feature[]> = (() => {
   // TODO: Use Map.groupBy() instead, when it's available
@@ -154,24 +376,44 @@ const tagsToFeatures: Map<string, Feature[]> = (() => {
   return map;
 })();
 
+/**
+ * Check if a file is an authored definition or dist file. Throws on likely
+ * mistakes, such as `.yaml` files.
+ */
+function isDistOrDistable(path: string): boolean {
+  if (path.endsWith(".yaml.dist") || path.endsWith(".yaml")) {
+    throw new Error(
+      `YAML files must use .yml extension; ${path} has invalid extension`,
+    );
+  }
+  if (path.endsWith(".yml.dist") || path.endsWith(".yml")) {
+    return true;
+  }
+  logger.debug(`${path} is not a likely YAML file, skipping`);
+  return false;
+}
+
 function main() {
-  const filePaths = argv.paths.flatMap((fileOrDirectory) => {
+  const filePaths: string[] = argv.paths.flatMap((fileOrDirectory) => {
     if (fs.statSync(fileOrDirectory).isDirectory()) {
-      // Expand directory to any existing .dist file within.
-      // TODO: Change this to .yml when all features have dist files.
       return new fdir()
         .withBasePath()
-        .filter((fp) => fp.endsWith(".dist"))
+        .filter(isDistOrDistable)
         .crawl(fileOrDirectory)
         .sync();
     }
-    return fileOrDirectory;
+    return isDistOrDistable(fileOrDirectory) ? fileOrDirectory : [];
   });
 
   // Map from .yml to .yml.dist to filter out duplicates.
   const sourceToDist = new Map<string, string>(
     filePaths.map((filePath: string) => {
       const ext = path.extname(filePath);
+      if (ext === ".yaml") {
+        throw new Error(
+          `YAML files must use .yml extension; ${filePath} has invalid extension`,
+        );
+      }
       if (![".dist", ".yml"].includes(ext)) {
         throw new Error(
           `Cannot generate dist for ${filePath}, only YAML input is supported`,
@@ -204,7 +446,7 @@ function main() {
       }
     }
     if (updateNeeded) {
-      process.exit(1);
+      exitStatus = 1;
     }
   } else {
     // Update dist in place.
@@ -215,5 +457,7 @@ function main() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  checkForStaleCompat();
   main();
+  process.exit(exitStatus);
 }
